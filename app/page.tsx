@@ -39,6 +39,7 @@ export default function GamePage() {
     winner: null,
     error: null,
     opponentReady: false,
+    myReady: false,
     myShips: [],
     shipsPlaced: [],
   };
@@ -99,7 +100,9 @@ export default function GamePage() {
             (state.placingHorizontal ? 'HORIZONTAL' : 'VERTICAL') +
             ' [R to rotate]';
         }
-        return state.opponentReady ? 'ENEMY READY — DEPLOY YOUR FLEET!' : 'WAITING FOR ENEMY DEPLOYMENT...';
+        if (state.myReady && state.opponentReady) return 'BATTLE STARTING...';
+        if (state.myReady) return 'FLEET DEPLOYED — WAITING FOR ENEMY...';
+        return state.opponentReady ? 'ENEMY READY — DEPLOY YOUR FLEET!' : 'DEPLOY ALL SHIPS THEN CLICK BATTLE STATIONS!';
       case 'battle':
         return state.myTurn ? '>>> YOUR TURN — SELECT TARGET <<<' : '--- ENEMY TARGETING ---';
       case 'finished':
@@ -137,8 +140,10 @@ export default function GamePage() {
 
     if (state.placingShipIdx < SHIP_SIZES.length) {
       html += '<button class="btn" onclick="window._rotate()">ROTATE [R]</button>';
-    } else {
+    } else if (!state.myReady) {
       html += '<button class="btn ready-btn" onclick="window._ready()">BATTLE STATIONS!</button>';
+    } else {
+      html += '<div class="status" style="margin-top:16px;animation:blink 1s infinite">FLEET DEPLOYED — STANDING BY...</div>';
     }
     return html;
   }
@@ -215,10 +220,19 @@ export default function GamePage() {
   };
 
   window._ready = function() {
+    state.myReady = true;
+    render();
     Usion.game.action('ready', { ships: state.shipsPlaced }).catch(function(err) {
+      state.myReady = false;
       state.error = 'FAILED TO DEPLOY: ' + err.message;
       render();
     });
+    // Check if opponent was already ready
+    if (state.opponentReady) {
+      state.phase = 'battle';
+      state.myTurn = state.playerIds[0] === state.myId;
+      render();
+    }
   };
 
   window._rematch = function() {
@@ -278,39 +292,26 @@ export default function GamePage() {
       var fromMe = data.player_id === state.myId;
 
       if (type === 'ready') {
-        if (!fromMe) {
+        if (fromMe) {
+          state.myReady = true;
+        } else {
           state.opponentReady = true;
         }
-        render();
-        return;
-      }
-
-      if (type === 'battle_start') {
-        state.phase = 'battle';
-        state.myTurn = d.first_turn === state.myId;
-        render();
-        return;
-      }
-
-      if (type === 'fire_result') {
-        var row = d.row, col = d.col, result = d.result;
-        if (d.attacker === state.myId) {
-          state.enemyGrid[row][col] = result;
-          state.myTurn = false;
-        } else {
-          if (state.myGrid[row][col] === 'ship') {
-            state.myGrid[row][col] = 'hit';
-          } else {
-            state.myGrid[row][col] = 'miss';
-          }
-          state.myTurn = true;
+        // Both ready → start battle
+        if (state.myReady && state.opponentReady) {
+          state.phase = 'battle';
+          state.myTurn = state.playerIds[0] === state.myId;
         }
         render();
         return;
       }
 
       if (type === 'fire') {
-        if (fromMe) return;
+        if (fromMe) {
+          // I fired — wait for opponent's fire_result response
+          return;
+        }
+        // Opponent fired at my grid — check hit/miss and respond
         var isHit = state.myGrid[d.row][d.col] === 'ship';
         if (isHit) {
           state.myGrid[d.row][d.col] = 'hit';
@@ -319,9 +320,32 @@ export default function GamePage() {
         }
         state.myTurn = true;
 
-        if (allShipsSunk(state.myGrid)) {
+        // Send result back so attacker can update their enemy grid
+        Usion.game.action('fire_result', {
+          row: d.row,
+          col: d.col,
+          result: isHit ? 'hit' : 'miss',
+          attacker: data.player_id,
+          allSunk: isHit && allShipsSunk(state.myGrid),
+        });
+
+        if (isHit && allShipsSunk(state.myGrid)) {
           state.phase = 'finished';
           state.winner = data.player_id;
+        }
+        render();
+        return;
+      }
+
+      if (type === 'fire_result') {
+        if (fromMe) return; // ignore my own fire_result echo
+        // I was the attacker — update my enemy grid view
+        state.enemyGrid[d.row][d.col] = d.result;
+        state.myTurn = false;
+
+        if (d.allSunk) {
+          state.phase = 'finished';
+          state.winner = state.myId;
         }
         render();
         return;
@@ -346,6 +370,7 @@ export default function GamePage() {
       state.winner = null;
       state.myTurn = false;
       state.opponentReady = false;
+      state.myReady = false;
       state.phase = 'setup';
       render();
     });
