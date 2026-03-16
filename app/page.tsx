@@ -55,6 +55,21 @@ export default function GamePage() {
 
   var $ = function(s) { return document.querySelector(s); };
 
+  // ─── Debug Logging ────────────────────────────────────────
+  var LOG_PREFIX = '[SpaceInvaders]';
+  function log() {
+    var args = [LOG_PREFIX].concat(Array.prototype.slice.call(arguments));
+    console.log.apply(console, args);
+  }
+  function logState(label) {
+    log(label, '| phase=' + state.phase,
+      '| myId=' + state.myId,
+      '| players=' + JSON.stringify(state.playerIds),
+      '| myReady=' + state.myReady,
+      '| opponentReady=' + state.opponentReady,
+      '| myTurn=' + state.myTurn);
+  }
+
   // ─── Rendering ────────────────────────────────────────────
   function render() {
     var app = $('#app');
@@ -250,39 +265,55 @@ export default function GamePage() {
   });
 
   // ─── SDK Init ─────────────────────────────────────────────
+  log('Waiting for Usion.init...');
   Usion.init(function(config) {
     state.myId = config.userId;
     state.roomId = config.roomId;
+    log('INIT received', '| userId=' + config.userId, '| roomId=' + config.roomId);
+    log('Full config:', JSON.stringify(config));
 
+    log('Calling game.connect()...');
     Usion.game.connect()
-      .then(function() { return Usion.game.join(config.roomId); })
+      .then(function() {
+        log('game.connect() SUCCESS — socket connected');
+        log('Calling game.join(' + config.roomId + ')...');
+        return Usion.game.join(config.roomId);
+      })
       .then(function(joinData) {
+        log('game.join() SUCCESS', '| joinData:', JSON.stringify(joinData));
         state.playerIds = joinData.player_ids || [];
         if (state.playerIds.length >= 2) {
           state.phase = 'setup';
         } else {
           state.phase = 'waiting';
         }
+        logState('After join');
         render();
       })
       .catch(function(err) {
+        log('CONNECTION ERROR:', err.message, err.stack || '');
         state.error = 'CONNECTION FAILED: ' + err.message;
         render();
       });
 
     Usion.game.onPlayerJoined(function(data) {
+      log('EVENT: onPlayerJoined', JSON.stringify(data));
       state.playerIds = data.player_ids || state.playerIds;
       if (state.playerIds.length >= 2 && state.phase === 'waiting') {
         state.phase = 'setup';
+        log('Transitioning to setup — 2 players present');
       }
+      logState('After playerJoined');
       render();
     });
 
     Usion.game.onStateUpdate(function(data) {
+      log('EVENT: onStateUpdate', JSON.stringify(data));
       if (data.game_state) {
         if (data.game_state.phase) state.phase = data.game_state.phase;
         if (data.game_state.myTurn !== undefined) state.myTurn = data.game_state.myTurn;
       }
+      logState('After stateUpdate');
       render();
     });
 
@@ -290,29 +321,34 @@ export default function GamePage() {
       var type = data.action_type;
       var d = data.action_data || {};
       var fromMe = data.player_id === state.myId;
+      log('EVENT: onAction', '| type=' + type, '| fromMe=' + fromMe, '| player=' + data.player_id, '| data:', JSON.stringify(d));
 
       if (type === 'ready') {
         if (fromMe) {
           state.myReady = true;
+          log('My ready confirmed via onAction');
         } else {
           state.opponentReady = true;
+          log('Opponent ready received');
         }
         // Both ready → start battle
         if (state.myReady && state.opponentReady) {
           state.phase = 'battle';
           state.myTurn = state.playerIds[0] === state.myId;
+          log('BOTH READY — starting battle! myTurn=' + state.myTurn);
         }
+        logState('After ready');
         render();
         return;
       }
 
       if (type === 'fire') {
         if (fromMe) {
-          // I fired — wait for opponent's fire_result response
+          log('Ignoring own fire echo');
           return;
         }
-        // Opponent fired at my grid — check hit/miss and respond
         var isHit = state.myGrid[d.row][d.col] === 'ship';
+        log('Opponent fired at [' + d.row + ',' + d.col + '] — ' + (isHit ? 'HIT' : 'MISS'));
         if (isHit) {
           state.myGrid[d.row][d.col] = 'hit';
         } else {
@@ -320,47 +356,59 @@ export default function GamePage() {
         }
         state.myTurn = true;
 
-        // Send result back so attacker can update their enemy grid
+        var allSunk = isHit && allShipsSunk(state.myGrid);
+        log('Sending fire_result back | result=' + (isHit ? 'hit' : 'miss') + ' | allSunk=' + allSunk);
         Usion.game.action('fire_result', {
           row: d.row,
           col: d.col,
           result: isHit ? 'hit' : 'miss',
           attacker: data.player_id,
-          allSunk: isHit && allShipsSunk(state.myGrid),
+          allSunk: allSunk,
         });
 
-        if (isHit && allShipsSunk(state.myGrid)) {
+        if (allSunk) {
           state.phase = 'finished';
           state.winner = data.player_id;
+          log('ALL SHIPS SUNK — I lost! Winner: ' + data.player_id);
         }
+        logState('After opponent fire');
         render();
         return;
       }
 
       if (type === 'fire_result') {
-        if (fromMe) return; // ignore my own fire_result echo
-        // I was the attacker — update my enemy grid view
+        if (fromMe) {
+          log('Ignoring own fire_result echo');
+          return;
+        }
+        log('Fire result received: [' + d.row + ',' + d.col + '] = ' + d.result + ' | allSunk=' + d.allSunk);
         state.enemyGrid[d.row][d.col] = d.result;
         state.myTurn = false;
 
         if (d.allSunk) {
           state.phase = 'finished';
           state.winner = state.myId;
+          log('ALL ENEMY SHIPS SUNK — I win!');
         }
+        logState('After fire_result');
         render();
         return;
       }
 
+      log('Unhandled action type:', type);
       render();
     });
 
     Usion.game.onGameFinished(function(data) {
+      log('EVENT: onGameFinished', JSON.stringify(data));
       state.phase = 'finished';
       state.winner = data.winner_ids && data.winner_ids[0] ? data.winner_ids[0] : null;
+      logState('After gameFinished');
       render();
     });
 
     Usion.game.onGameRestarted(function() {
+      log('EVENT: onGameRestarted');
       state.myGrid = createEmptyGrid();
       state.enemyGrid = createEmptyGrid();
       state.placingShipIdx = 0;
@@ -372,21 +420,25 @@ export default function GamePage() {
       state.opponentReady = false;
       state.myReady = false;
       state.phase = 'setup';
+      logState('After restart');
       render();
     });
 
     Usion.game.onError(function(data) {
+      log('EVENT: onError', JSON.stringify(data));
       state.error = data.message || 'SYSTEM ERROR';
       render();
       setTimeout(function() { state.error = null; render(); }, 4000);
     });
 
     Usion.game.onDisconnect(function() {
+      log('EVENT: onDisconnect');
       state.error = 'CONNECTION LOST';
       render();
     });
 
     Usion.game.onReconnect(function() {
+      log('EVENT: onReconnect');
       state.error = null;
       Usion.game.requestSync();
       render();
