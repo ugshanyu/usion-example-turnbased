@@ -235,15 +235,22 @@ export default function GamePage() {
   };
 
   window._ready = function() {
+    log('_ready() CLICKED! shipsPlaced:', JSON.stringify(state.shipsPlaced));
+    log('_ready() state before:', 'myReady=' + state.myReady, 'opponentReady=' + state.opponentReady, 'phase=' + state.phase);
     state.myReady = true;
     render();
-    Usion.game.action('ready', { ships: state.shipsPlaced }).catch(function(err) {
+    log('_ready() sending action "ready" with ships...');
+    Usion.game.action('ready', { ships: state.shipsPlaced }).then(function(result) {
+      log('_ready() action sent OK, result:', JSON.stringify(result));
+    }).catch(function(err) {
+      log('_ready() action FAILED:', err.message);
       state.myReady = false;
       state.error = 'FAILED TO DEPLOY: ' + err.message;
       render();
     });
     // Check if opponent was already ready
     if (state.opponentReady) {
+      log('_ready() opponent already ready — transitioning to battle!');
       state.phase = 'battle';
       state.myTurn = state.playerIds[0] === state.myId;
       render();
